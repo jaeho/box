@@ -20,18 +20,18 @@ import kotlinx.coroutines.launch
  * Created by jaehochoe on 2020-01-03.
  */
 abstract class BoxActivity<S : BoxState, E : BoxEvent, SE : BoxSideEffect> : AppCompatActivity(),
-    BoxAndroidView {
+    BoxAndroidView<S, E> {
 
-    private val rendererList: List<BoxRenderer> by lazy {
-        val list = (extraRenderer() ?: mutableListOf())
+    private val rendererList: List<BoxRenderer<S, E>> by lazy {
+        val list = (renderers() ?: mutableListOf())
         renderer?.let {
-            list.add(0, it)
+            list.add(it)
         }
         list
     }
-    abstract val renderer: BoxRenderer?
+    abstract val renderer: BoxRenderer<S, E>?
 
-    abstract val viewInitializer: BoxViewInitializer?
+    abstract val viewInitializer: BoxViewInitializer<S, E>?
 
     abstract val vm: BoxVm<S, E, SE>?
 
@@ -48,21 +48,12 @@ abstract class BoxActivity<S : BoxState, E : BoxEvent, SE : BoxSideEffect> : App
         vm?.let {
             binding?.lifecycleOwner = this
             it.bind(this@BoxActivity)
+            viewInitializer?.bindingVm(binding, it)
             it.launch {
                 subscribe(BoxInAppEvent.asChannel())
             }
         }
         viewInitializer?.initializeView(this, vm)
-    }
-
-    override fun render(state: BoxState) {
-        rendererList.forEach { renderer ->
-            renderer.renderView(this, state, vm)
-        }
-    }
-
-    override fun intent(event: BoxEvent) {
-        vm?.intent(event)
     }
 
     private suspend fun subscribe(channel: ReceiveChannel<InAppEvent>) {
@@ -82,8 +73,19 @@ abstract class BoxActivity<S : BoxState, E : BoxEvent, SE : BoxSideEffect> : App
         super.onDestroy()
     }
 
+    override fun render(state: S) {
+        rendererList.forEach { renderer ->
+            if (renderer.render(this, state, vm))
+                return@forEach
+        }
+    }
+
+    override fun intent(event: E) {
+        vm?.intent(event)
+    }
+
     @Suppress("UNUSED")
-    fun extraRenderer(): MutableList<BoxRenderer>? {
+    fun renderers(): MutableList<BoxRenderer<S, E>>? {
         return null
     }
 
