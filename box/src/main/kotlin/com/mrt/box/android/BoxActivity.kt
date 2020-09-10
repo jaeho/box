@@ -6,10 +6,11 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.databinding.DataBindingUtil
 import androidx.databinding.ViewDataBinding
 import androidx.fragment.app.Fragment
-import com.mrt.box.android.event.BoxInAppEvent
-import com.mrt.box.android.event.InAppEvent
+import com.mrt.box.event.BoxInAppEvent
+import com.mrt.box.event.InAppEvent
 import com.mrt.box.core.Box
 import com.mrt.box.core.BoxEvent
+import com.mrt.box.core.BoxMultipleScopeState
 import com.mrt.box.core.BoxSideEffect
 import com.mrt.box.core.BoxState
 import kotlinx.coroutines.cancel
@@ -20,24 +21,19 @@ import kotlinx.coroutines.launch
  * Created by jaehochoe on 2020-01-03.
  */
 abstract class BoxActivity<S : BoxState, E : BoxEvent, SE : BoxSideEffect> : AppCompatActivity(),
-    BoxAndroidView<S, E> {
+    BoxAndroidView {
 
-    private val rendererList: List<BoxRenderer<S, E>> by lazy {
-        val list = (renderers() ?: mutableListOf())
-        renderer?.let {
-            list.add(it)
-        }
-        list
-    }
-    abstract val renderer: BoxRenderer<S, E>?
+    abstract val renderer: BoxRenderer?
 
-    abstract val viewInitializer: BoxViewInitializer<S, E>?
+    abstract val viewInitializer: BoxViewInitializer?
 
     abstract val vm: BoxVm<S, E, SE>?
 
     override val binding: ViewDataBinding? by lazy {
         if (layout > 0) DataBindingUtil.setContentView<ViewDataBinding>(this, layout) else null
     }
+
+    open val partialRenderers: Map<BoxRenderingScope, BoxRenderer>? = null
 
     open fun preOnCreate(savedInstanceState: Bundle?) {
     }
@@ -48,12 +44,25 @@ abstract class BoxActivity<S : BoxState, E : BoxEvent, SE : BoxSideEffect> : App
         vm?.let {
             binding?.lifecycleOwner = this
             it.bind(this@BoxActivity)
-            viewInitializer?.bindingVm(binding, it)
             it.launch {
                 subscribe(BoxInAppEvent.asChannel())
             }
         }
         viewInitializer?.initializeView(this, vm)
+    }
+
+    override fun render(state: BoxState) {
+        partialRenderers?.forEach {
+            if (state.scope() == it.key || if(state is BoxMultipleScopeState) state.scopes().contains(it.key) else false) {
+                it.value.renderView(this, state, vm)
+            }
+        }
+        if (state.scope() == BoxVoidRenderingScope)
+            renderer?.renderView(this, state, vm)
+    }
+
+    override fun intent(event: BoxEvent) {
+        vm?.intent(event)
     }
 
     private suspend fun subscribe(channel: ReceiveChannel<InAppEvent>) {
@@ -71,22 +80,6 @@ abstract class BoxActivity<S : BoxState, E : BoxEvent, SE : BoxSideEffect> : App
         viewInitializer?.onCleared()
         vm?.cancel()
         super.onDestroy()
-    }
-
-    override fun render(state: S) {
-        rendererList.forEach { renderer ->
-            if (renderer.render(this, state, vm))
-                return@forEach
-        }
-    }
-
-    override fun intent(event: E) {
-        vm?.intent(event)
-    }
-
-    @Suppress("UNUSED")
-    fun renderers(): MutableList<BoxRenderer<S, E>>? {
-        return null
     }
 
     override fun activity(): AppCompatActivity {

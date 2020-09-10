@@ -8,10 +8,11 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.databinding.DataBindingUtil
 import androidx.databinding.ViewDataBinding
 import androidx.fragment.app.Fragment
-import com.mrt.box.android.event.BoxInAppEvent
-import com.mrt.box.android.event.InAppEvent
+import com.mrt.box.event.BoxInAppEvent
+import com.mrt.box.event.InAppEvent
 import com.mrt.box.core.Box
 import com.mrt.box.core.BoxEvent
+import com.mrt.box.core.BoxMultipleScopeState
 import com.mrt.box.core.BoxSideEffect
 import com.mrt.box.core.BoxState
 import kotlinx.coroutines.cancel
@@ -23,22 +24,16 @@ import kotlinx.coroutines.launch
  * Created by jaehochoe on 2020-01-03.
  */
 abstract class BoxFragment<S : BoxState, E : BoxEvent, SE : BoxSideEffect> : Fragment(),
-    BoxAndroidView<S, E> {
+    BoxAndroidView {
 
     abstract val isNeedLazyLoading: Boolean
     private var isBound = false
 
-    private val rendererList: List<BoxRenderer<S, E>> by lazy {
-        val list = (renderers() ?: mutableListOf())
-        renderer?.let {
-            list.add(it)
-        }
-        list
-    }
+    open val partialRenderers: Map<BoxRenderingScope, BoxRenderer>? = null
 
-    abstract val renderer: BoxRenderer<S, E>?
+    abstract val renderer: BoxRenderer?
 
-    abstract val viewInitializer: BoxViewInitializer<S, E>?
+    abstract val viewInitializer: BoxViewInitializer?
 
     abstract val vm: BoxVm<S, E, SE>?
 
@@ -100,26 +95,26 @@ abstract class BoxFragment<S : BoxState, E : BoxEvent, SE : BoxSideEffect> : Fra
     private fun bindingVm() {
         vm?.let {
             viewInitializer?.initializeView(this, vm)
-            viewInitializer?.bindingVm(binding, it)
             it.bind(this)
             isBound = true
         }
     }
 
-
-    override fun render(state: S) {
-        rendererList.forEach { renderer ->
-            if (renderer.render(this, state, vm))
-                return@forEach
+    override fun render(state: BoxState) {
+        partialRenderers?.forEach {
+            if (state.scope() == it.key || if(state is BoxMultipleScopeState) state.scopes().contains(it.key) else false) {
+                it.value.renderView(this, state, vm)
+            }
         }
+        if (state.scope() == BoxVoidRenderingScope)
+            renderer?.renderView(this, state, vm)
     }
 
-    override fun intent(event: E) {
+    override fun intent(event: BoxEvent) {
         vm?.intent(event)
     }
 
-    @Suppress("UNUSED")
-    fun renderers(): MutableList<BoxRenderer<S, E>>? {
+    open fun extraRenderer(): MutableList<BoxRenderer>? {
         return null
     }
 

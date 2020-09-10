@@ -6,18 +6,34 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModel
-import com.mrt.box.android.event.InAppEvent
-import com.mrt.box.core.*
+import com.mrt.box.event.InAppEvent
+import com.mrt.box.core.AsyncWork
+import com.mrt.box.core.Box
+import com.mrt.box.core.BoxBlueprint
+import com.mrt.box.core.BoxEvent
+import com.mrt.box.core.BoxMultipleScopeState
+import com.mrt.box.core.BoxOutput
+import com.mrt.box.core.BoxSideEffect
+import com.mrt.box.core.BoxState
+import com.mrt.box.core.BoxVoidSideEffect
+import com.mrt.box.core.BoxVoidState
+import com.mrt.box.core.HeavyWork
+import com.mrt.box.core.IOWork
+import com.mrt.box.core.LightWork
+import com.mrt.box.core.Vm
 import com.mrt.box.isValidEvent
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.CoroutineContext
 
 
 /**
  * Created by jaehochoe on 2020-01-01.
  */
-abstract class BoxVm<S : BoxState, E : BoxEvent, SE : BoxSideEffect> : ViewModel(), CoroutineScope,
-        Vm {
+abstract class BoxVm<S : BoxState, E : BoxEvent, SE : BoxSideEffect> : ViewModel(), CoroutineScope, Vm {
 
     abstract val bluePrint: BoxBlueprint<S, E, SE>
 
@@ -58,7 +74,7 @@ abstract class BoxVm<S : BoxState, E : BoxEvent, SE : BoxSideEffect> : ViewModel
 
     private fun model(event: E): BoxOutput<S, E, SE> {
         return bluePrint.reduce(stateInternal, event).also { output ->
-            Box.log { "BoxVm found Event [$event]" }
+            Box.log { "BoxVm found Event [${event.javaClass.simpleName}]" }
             handleOutput(output)
         }
     }
@@ -71,13 +87,19 @@ abstract class BoxVm<S : BoxState, E : BoxEvent, SE : BoxSideEffect> : ViewModel
                 if (output.to !is BoxVoidState) {
                     stateInternal = output.to
                     view(output.to)
+
+                    // State's scope will initialized when finished rendering
+                    when(output.to) {
+                        is BoxState -> output.to.scope = null
+                        is BoxMultipleScopeState -> output.to.clearAllScopes()
+                    }
                 }
 
                 if (output.sideEffect != null && output.sideEffect !is BoxVoidSideEffect) {
                     handleSideEffect(output)
                 }
 
-                ((if (output.to is BoxVoidState) stateInternal.consumer() else output.to.consumer()) as? S)?.let { newState ->
+                ((if (output.to is BoxVoidState) stateInternal.recycle() else output.to.recycle()) as? S)?.let { newState ->
                     stateInternal = newState
                 }
             }
@@ -98,53 +120,69 @@ abstract class BoxVm<S : BoxState, E : BoxEvent, SE : BoxSideEffect> : ViewModel
         bluePrint.ioWorkOrNull(sideEffect)?.let {
             doWorkInIOThread(output, it)
         }
+        bluePrint.asyncWorkOrNull(sideEffect)?.let {
+            doWorkAsync(output, it)
+        }
     }
 
     private fun doWork(
-            output: BoxOutput.Valid<S, E, SE>,
-            toDo: LightWork<S, E, SE>
+        output: BoxOutput.Valid<S, E, SE>,
+        toDo: LightWork<S, E, SE>
     ) {
         Box.log { "Do in Foreground: ${output.sideEffect}" }
         toDo(output).also {
             Box.log { "Result is $it for ${output.sideEffect}" }
-            handleResult(it)
+            handleSideEffectResult(it)
         }
     }
 
     private fun doWorkInBackgroundThread(
-            output: BoxOutput.Valid<S, E, SE>,
-            toDo: HeavyWork<S, E, SE>
+        output: BoxOutput.Valid<S, E, SE>,
+        toDo: HeavyWork<S, E, SE>
     ) {
         Box.log { "Do in Background: ${output.sideEffect}" }
         workThread {
             toDo(output)?.also {
                 Box.log { "Result is $it for ${output.sideEffect}" }
-                handleResult(it)
+                handleSideEffectResult(it)
             }
         }
     }
 
     private fun doWorkInIOThread(
-            output: BoxOutput.Valid<S, E, SE>,
-            toDo: IOWork<S, E, SE>
+        output: BoxOutput.Valid<S, E, SE>,
+        toDo: IOWork<S, E, SE>
     ) {
         Box.log { "Do in IO: ${output.sideEffect}" }
         ioThread {
             toDo(output)?.also {
                 Box.log { "Result is $it for ${output.sideEffect}" }
-                handleResult(it)
+                handleSideEffectResult(it)
+            }
+        }
+    }
+
+    private fun doWorkAsync(
+        output: BoxOutput.Valid<S, E, SE>,
+        toDo: AsyncWork<S, E, SE>
+    ) {
+        Box.log { "Do Async: ${output.sideEffect}" }
+        launch {
+            toDo(output)?.await()?.also {
+                Box.log { "Result is $it for ${output.sideEffect}" }
+                handleSideEffectResult(it)
             }
         }
     }
 
     @SuppressWarnings("unchecked")
-    fun handleResult(result: Any?) {
+    fun handleSideEffectResult(result: Any?) {
         when (result) {
             is BoxState -> {
                 if (result !is BoxVoidState) {
                     this.stateInternal = result as S
                     mainThread { view(result) }
-                    result.consumer()?.let {
+                    result.recycle()?.let {
                         this.stateInternal = it as S
                     }
                 }
@@ -184,7 +222,7 @@ abstract class BoxVm<S : BoxState, E : BoxEvent, SE : BoxSideEffect> : ViewModel
         }
     }
 
-    fun <V : BoxAndroidView<S, E>> bind(view: V) {
+    fun <V : BoxAndroidView> bind(view: V) {
         when (view) {
             is LifecycleOwner -> {
                 currentState.observe(view, Observer {
@@ -206,10 +244,10 @@ abstract class BoxVm<S : BoxState, E : BoxEvent, SE : BoxSideEffect> : ViewModel
     }
 
     open fun onActivityResult(
-            activity: AppCompatActivity,
-            requestCode: Int,
-            resultCode: Int,
-            data: Intent?
+        activity: AppCompatActivity,
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?
     ) {
         linkedVms()?.forEach {
             it.onActivityResult(activity, requestCode, resultCode, data)

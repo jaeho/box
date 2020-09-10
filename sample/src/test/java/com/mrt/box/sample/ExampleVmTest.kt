@@ -40,11 +40,12 @@ class ExampleVmTest : VmTest<ExampleState, ExampleEvent, ExampleSideEffect>() {
     @Test
     fun `intent OnClickLayout`() {
         val output = vm.testIntent(ExampleEvent.OnClickLayout)
+        doHeavySideEffect(output.valid())
         runBlocking {
-            doHeavySideEffect(output.valid())
             verify(vm).autoCountUpAsync(3)
         }
     }
+
     @Test
     fun `intent OnClickFinish`() {
         val activity = mock(Activity::class.java)
